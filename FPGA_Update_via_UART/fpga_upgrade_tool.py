@@ -164,7 +164,7 @@ class FPGAUpgradeTool:
         """
         初始化操作按钮区域
         
-        创建操作按钮界面，包含开始升级和回读Flash按钮
+        创建操作按钮界面，包含开始升级按钮
         
         Args:
             parent (ttk.Frame): 父容器框架
@@ -173,13 +173,9 @@ class FPGAUpgradeTool:
         frame = ttk.LabelFrame(parent, text="操作", padding="10")
         frame.pack(fill=tk.X, pady=5)
 
-        # 开始升级按钮
-        self.btn_start = ttk.Button(frame, text="开始升级", command=self.start_upgrade)
-        self.btn_start.grid(row=0, column=0, padx=10)
-
-        # 回读Flash按钮
-        self.btn_readback = ttk.Button(frame, text="回读 Flash", command=self.start_readback)
-        self.btn_readback.grid(row=0, column=1, padx=10)
+        # 开始升级按钮（居中放大）
+        self.btn_start = ttk.Button(frame, text="开始升级", command=self.start_upgrade, width=20)
+        self.btn_start.pack(pady=5)  # 使用pack居中显示
 
     def setup_progress_section(self, parent):
         """
@@ -245,8 +241,8 @@ class FPGAUpgradeTool:
 
         # 回读日志标签和滚动文本框
         ttk.Label(frame2, text="日志：").pack(anchor=tk.W)
-        self.readback_log = scrolledtext.ScrolledText(frame2, height=15, state=tk.DISABLED)
-        self.readback_log.pack(fill=tk.BOTH, expand=True, pady=2)
+        self.readback_log_text = scrolledtext.ScrolledText(frame2, height=15, state=tk.DISABLED)
+        self.readback_log_text.pack(fill=tk.BOTH, expand=True, pady=2)
 
     def refresh_ports(self):
         """
@@ -410,6 +406,7 @@ class FPGAUpgradeTool:
         发送命令帧到串口，等待100ms内接收响应
         成功响应：连续5个0x66
         失败响应：连续5个0xEE
+        支持最多5次重试
         
         Args:
             cmd (bytes): 命令帧
@@ -421,39 +418,41 @@ class FPGAUpgradeTool:
         if not self.is_open or not self.ser.is_open:
             return False
         
-        try:
-            # 清空输入缓冲区
-            self.ser.reset_input_buffer()
-            # 发送命令
-            self.ser.write(cmd)
-            self.ser.flush()
-            
-            # 等待响应（100ms超时）
-            start_time = time.time()
-            response = bytearray()
-            
-            while time.time() - start_time < 0.1:
-                if self.ser.in_waiting > 0:
-                    # 添加调试打印
-                    #print(f"[DEBUG] in_waiting: {self.ser.in_waiting}")
-
-                    response.extend(self.ser.read(self.ser.in_waiting))
-
-                    # 添加调试打印
-                    #print(f"[DEBUG] response 内容: {response.hex()}")
-                    #print(f"[DEBUG] response 长度: {len(response)}")
-                    # 检查响应
-                    if len(response) >= 5:
-                        if response[-5:] == bytes([0x66, 0x66, 0x66, 0x66, 0x66]):
-                            return True  # 成功
-                        elif response[-5:] == bytes([0xEE, 0xEE, 0xEE, 0xEE, 0xEE]):
-                            return False  # 失败
-                time.sleep(0.001)
-            
-            return False  # 超时
-        except Exception as e:
-            self.log("发送命令异常: {}".format(str(e)))
-            return False
+        max_retries = 5
+        for retry in range(max_retries):
+            try:
+                # 清空输入缓冲区
+                self.ser.reset_input_buffer()
+                # 发送命令
+                self.ser.write(cmd)
+                self.ser.flush()
+                
+                # 等待响应（100ms超时）
+                start_time = time.time()
+                response = bytearray()
+                
+                while time.time() - start_time < 0.1:
+                    if self.ser.in_waiting > 0:
+                        response.extend(self.ser.read(self.ser.in_waiting))
+                        
+                        # 检查响应
+                        if len(response) >= 5:
+                            if response[-5:] == bytes([0x66, 0x66, 0x66, 0x66, 0x66]):
+                                return True  # 成功
+                            elif response[-5:] == bytes([0xEE, 0xEE, 0xEE, 0xEE, 0xEE]):
+                                break  # 失败，准备重试
+                    time.sleep(0.001)
+                
+                # 超时或收到EE，继续重试
+                if retry < max_retries - 1:
+                    self.log(f"命令响应失败，重试 {retry + 1}/{max_retries}")
+                
+            except Exception as e:
+                self.log("发送命令异常: {}".format(str(e)))
+                if retry < max_retries - 1:
+                    self.log(f"异常重试 {retry + 1}/{max_retries}")
+        
+        return False  # 超过最大重试次数，返回失败
 
     def log(self, msg):
         """
@@ -479,10 +478,10 @@ class FPGAUpgradeTool:
         Args:
             msg (str): 日志消息
         """
-        self.readback_log.config(state=tk.NORMAL)
-        self.readback_log.insert(tk.END, "[{}] {}\n".format(time.strftime("%H:%M:%S"), msg))
-        self.readback_log.see(tk.END)
-        self.readback_log.config(state=tk.DISABLED)
+        self.readback_log_text.config(state=tk.NORMAL)
+        self.readback_log_text.insert(tk.END, "[{}] {}\n".format(time.strftime("%H:%M:%S"), msg))
+        self.readback_log_text.see(tk.END)
+        self.readback_log_text.config(state=tk.DISABLED)
         self.root.update_idletasks()
 
     def start_upgrade(self):
@@ -751,7 +750,7 @@ class FPGAUpgradeTool:
         while time.time() - start_time < 0.1:
             if self.ser.in_waiting > 0:
                 response.extend(self.ser.read(self.ser.in_waiting))
-                if len(response) >= 266:
+                if len(response) >= 265:
                     if response[:4] == self.frame_header and response[-4:] == self.frame_tail:
                         return response
             time.sleep(0.001)
