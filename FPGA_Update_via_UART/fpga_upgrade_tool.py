@@ -6,6 +6,7 @@ import os
 import zlib
 import math
 import time
+import threading
 
 class FPGAUpgradeTool:
     def __init__(self, root):
@@ -18,7 +19,7 @@ class FPGAUpgradeTool:
         # 初始化主窗口
         self.root = root
         self.root.title("FPGA 串口在线升级工具")  # 设置窗口标题
-        self.root.geometry("800x600")              # 设置窗口大小
+        self.root.geometry("800x700")              # 设置窗口大小，增加高度
         self.root.resizable(False, False)          # 禁止窗口大小调整
 
         # 串口相关变量初始化
@@ -38,6 +39,10 @@ class FPGAUpgradeTool:
         # 协议帧格式定义
         self.frame_header = bytes([0x55, 0x66, 0x99, 0xAA])  # 帧头
         self.frame_tail = bytes([0xAA, 0x99, 0x66, 0x55])    # 帧尾
+        
+        # 线程相关
+        self.worker_thread = None
+        self.stop_event = threading.Event()
         
         # 初始化UI界面和刷新串口列表
         self.setup_ui()
@@ -93,7 +98,7 @@ class FPGAUpgradeTool:
 
         # 波特率标签和下拉框
         ttk.Label(frame, text="波特率：").grid(row=0, column=2, padx=5, sticky=tk.W)
-        baud_rates = ["9600", "115200", "230400", "460800", "921600"]  # 常见波特率列表
+        baud_rates = ["9600", "115200", "230400", "460800", "921600", "1000000", "2000000"]  # 常见波特率列表
         self.cmb_baud = ttk.Combobox(frame, values=baud_rates, width=12)
         self.cmb_baud.current(1)  # 默认选中115200
         self.cmb_baud.grid(row=0, column=3, padx=5)
@@ -164,7 +169,7 @@ class FPGAUpgradeTool:
         """
         初始化操作按钮区域
         
-        创建操作按钮界面，包含开始升级按钮
+        创建操作按钮界面，包含开始升级按钮、取消按钮和读取FLASH ID按钮
         
         Args:
             parent (ttk.Frame): 父容器框架
@@ -173,9 +178,46 @@ class FPGAUpgradeTool:
         frame = ttk.LabelFrame(parent, text="操作", padding="10")
         frame.pack(fill=tk.X, pady=5)
 
-        # 开始升级按钮（居中放大）
-        self.btn_start = ttk.Button(frame, text="开始升级", command=self.start_upgrade, width=20)
-        self.btn_start.pack(pady=5)  # 使用pack居中显示
+        # 按钮区域
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(side=tk.LEFT, padx=10)
+        
+        # 开始升级按钮
+        self.btn_start = ttk.Button(btn_frame, text="开始升级", command=self.start_upgrade, width=15)
+        self.btn_start.pack(pady=5, side=tk.LEFT)
+        
+        # 取消按钮（初始禁用）
+        self.btn_cancel = ttk.Button(btn_frame, text="取消", command=self.cancel_operation, width=15, state=tk.DISABLED)
+        self.btn_cancel.pack(pady=5, side=tk.LEFT, padx=10)
+        
+        # 读取FLASH ID按钮
+        self.btn_read_id = ttk.Button(btn_frame, text="读取FLASH ID", command=self.read_flash_id, width=15)
+        self.btn_read_id.pack(pady=5, side=tk.LEFT)
+        
+        # FLASH ID显示区域（竖向排列）
+        id_frame = ttk.Frame(frame)
+        id_frame.pack(side=tk.LEFT, padx=20)
+        
+        # Manufacture ID显示
+        id_row1 = ttk.Frame(id_frame)
+        id_row1.pack(fill=tk.X, pady=2)
+        ttk.Label(id_row1, text="Manufacture ID:", width=16).pack(side=tk.LEFT)
+        self.txt_manufacture_id = ttk.Entry(id_row1, width=10, state=tk.DISABLED)
+        self.txt_manufacture_id.pack(side=tk.LEFT)
+        
+        # Memory Type显示
+        id_row2 = ttk.Frame(id_frame)
+        id_row2.pack(fill=tk.X, pady=2)
+        ttk.Label(id_row2, text="Memory Type:", width=16).pack(side=tk.LEFT)
+        self.txt_memory_type = ttk.Entry(id_row2, width=10, state=tk.DISABLED)
+        self.txt_memory_type.pack(side=tk.LEFT)
+        
+        # Memory Capacity显示
+        id_row3 = ttk.Frame(id_frame)
+        id_row3.pack(fill=tk.X, pady=2)
+        ttk.Label(id_row3, text="Memory Capacity:", width=16).pack(side=tk.LEFT)
+        self.txt_memory_capacity = ttk.Entry(id_row3, width=12, state=tk.DISABLED)
+        self.txt_memory_capacity.pack(side=tk.LEFT)
 
     def setup_progress_section(self, parent):
         """
@@ -225,11 +267,15 @@ class FPGAUpgradeTool:
         # 开始回读按钮
         self.btn_start_readback = ttk.Button(frame, text="开始回读", command=self.start_readback)
         self.btn_start_readback.grid(row=0, column=2, padx=10)
+        
+        # 取消按钮（初始禁用）
+        self.btn_cancel_readback = ttk.Button(frame, text="取消", command=self.cancel_operation, state=tk.DISABLED)
+        self.btn_cancel_readback.grid(row=0, column=3, padx=10)
 
         # CRC32标签和显示框（只读）
-        ttk.Label(frame, text="CRC32：").grid(row=0, column=3, padx=10, sticky=tk.W)
+        ttk.Label(frame, text="CRC32：").grid(row=0, column=4, padx=10, sticky=tk.W)
         self.txt_crc = ttk.Entry(frame, width=16, state=tk.DISABLED)
-        self.txt_crc.grid(row=0, column=4, padx=5)
+        self.txt_crc.grid(row=0, column=5, padx=5)
 
         # 回读进度框架
         frame2 = ttk.LabelFrame(parent, text="回读进度", padding="10")
@@ -270,20 +316,150 @@ class FPGAUpgradeTool:
             port = self.cmb_port.get()
             baud = int(self.cmb_baud.get())
             
-            # 配置串口参数
+            # 关闭已打开的串口
+            if self.ser.is_open:
+                self.ser.close()
+            
+            # 创建新的串口对象
+            self.ser = serial.Serial()
             self.ser.port = port
-            self.ser.baudrate = baud
-            self.ser.timeout = 0.01      # 读取超时时间
-            self.ser.write_timeout = 1    # 写入超时时间
-            self.ser.open()               # 打开串口
-
+            self.ser.timeout = 0.01
+            self.ser.write_timeout = 1
+            
+            # 处理高波特率（非标准波特率）
+            if baud in [1000000, 2000000]:
+                # Windows上设置非标准波特率需要特殊处理
+                # 使用set_custom_baudrate方法或直接设置
+                self.ser.baudrate = baud
+                # 尝试先打开串口，然后通过Win32 API设置自定义波特率
+                self._set_high_baudrate(port, baud)
+            else:
+                self.ser.baudrate = baud
+                self.ser.open()
+            
             # 更新状态标志和按钮状态
             self.is_open = True
             self.btn_open.config(state=tk.DISABLED)
             self.btn_close.config(state=tk.NORMAL)
-            self.log("串口已打开: {}".format(port))
+            self.log("串口已打开: {} @ {} bps".format(port, baud))
+            
+        except ValueError as e:
+            messagebox.showerror("错误", "无效的参数: {}\n可能原因：波特率 {} 不是标准波特率".format(str(e), baud))
+            self.log("打开串口失败: 无效参数 - {}".format(str(e)))
+        except serial.SerialException as e:
+            error_msg = "打开串口失败: {}".format(str(e))
+            if "cannot set" in str(e).lower() or "baud" in str(e).lower() or "87" in str(e):
+                error_msg += "\n\n可能原因：\n1. 波特率 {} 超出串口硬件支持范围\n2. 当前操作系统不支持此波特率\n3. 串口驱动不支持非标准波特率".format(baud)
+            messagebox.showerror("错误", error_msg)
+            self.log("打开串口失败: {}".format(str(e)))
         except Exception as e:
             messagebox.showerror("错误", "打开串口失败: {}".format(str(e)))
+            self.log("打开串口失败: {}".format(str(e)))
+
+    def _set_high_baudrate(self, port, baud):
+        """
+        在Windows上设置高波特率（非标准波特率）
+        
+        Args:
+            port (str): 串口号
+            baud (int): 波特率
+        
+        Returns:
+            bool: 成功返回True，失败返回False
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+            
+            # Windows API常量
+            GENERIC_READ = 0x80000000
+            GENERIC_WRITE = 0x40000000
+            OPEN_EXISTING = 3
+            INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+            
+            # 创建DCB结构
+            class DCB(ctypes.Structure):
+                _fields_ = [
+                    ('DCBlength', wintypes.DWORD),
+                    ('BaudRate', wintypes.DWORD),
+                    ('fBinary', wintypes.BYTE),
+                    ('fParity', wintypes.BYTE),
+                    ('fOutxCtsFlow', wintypes.BYTE),
+                    ('fOutxDsrFlow', wintypes.BYTE),
+                    ('fDtrControl', wintypes.BYTE),
+                    ('fDsrSensitivity', wintypes.BYTE),
+                    ('fTXContinueOnXoff', wintypes.BYTE),
+                    ('fOutX', wintypes.BYTE),
+                    ('fInX', wintypes.BYTE),
+                    ('fErrorChar', wintypes.BYTE),
+                    ('fNull', wintypes.BYTE),
+                    ('fRtsControl', wintypes.BYTE),
+                    ('fAbortOnError', wintypes.BYTE),
+                    ('fDummy2', wintypes.BYTE),
+                    ('wReserved', wintypes.WORD),
+                    ('XonLim', wintypes.WORD),
+                    ('XoffLim', wintypes.WORD),
+                    ('ByteSize', wintypes.BYTE),
+                    ('Parity', wintypes.BYTE),
+                    ('StopBits', wintypes.BYTE),
+                    ('XonChar', wintypes.CHAR),
+                    ('XoffChar', wintypes.CHAR),
+                    ('ErrorChar', wintypes.CHAR),
+                    ('EofChar', wintypes.CHAR),
+                    ('EvtChar', wintypes.CHAR),
+                    ('wReserved1', wintypes.WORD),
+                ]
+            
+            # 打开串口
+            hCom = ctypes.windll.kernel32.CreateFileA(
+                port.encode('utf-8'),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                None,
+                OPEN_EXISTING,
+                0,
+                None
+            )
+            
+            if hCom == INVALID_HANDLE_VALUE:
+                raise Exception("无法打开串口")
+            
+            # 获取当前DCB配置
+            dcb = DCB()
+            dcb.DCBlength = ctypes.sizeof(DCB)
+            
+            if not ctypes.windll.kernel32.GetCommState(hCom, ctypes.byref(dcb)):
+                ctypes.windll.kernel32.CloseHandle(hCom)
+                raise Exception("无法获取串口状态")
+            
+            # 设置波特率和其他参数
+            dcb.BaudRate = baud
+            dcb.ByteSize = 8
+            dcb.Parity = 0  # NOPARITY
+            dcb.StopBits = 0  # ONESTOPBIT
+            
+            # 设置新的DCB配置
+            if not ctypes.windll.kernel32.SetCommState(hCom, ctypes.byref(dcb)):
+                ctypes.windll.kernel32.CloseHandle(hCom)
+                raise Exception("无法设置串口状态")
+            
+            # 关闭Windows句柄，让pyserial重新打开
+            ctypes.windll.kernel32.CloseHandle(hCom)
+            
+            # 现在让pyserial打开串口（使用已配置的波特率）
+            self.ser.baudrate = baud
+            self.ser.open()
+            
+            return True
+            
+        except Exception as e:
+            # 如果Win32 API方法失败，尝试使用pyserial的标准方式
+            try:
+                self.ser.baudrate = baud
+                self.ser.open()
+                return True
+            except:
+                raise e
 
     def close_serial(self):
         """
@@ -518,10 +694,20 @@ class FPGAUpgradeTool:
         
         # 设置升级状态
         self.is_upgrading = True
+        self.stop_event.clear()
         self.btn_start.config(state=tk.DISABLED)
+        self.btn_cancel.config(state=tk.NORMAL)
         self.progress_bar['value'] = 0
         self.progress_label.config(text="准备升级...")
         
+        # 在独立线程中执行升级操作
+        self.worker_thread = threading.Thread(target=self._upgrade_worker, daemon=True)
+        self.worker_thread.start()
+    
+    def _upgrade_worker(self):
+        """
+        升级工作线程
+        """
         try:
             # 读取BIN文件
             with open(self.file_path, 'rb') as f:
@@ -533,24 +719,30 @@ class FPGAUpgradeTool:
             self.log("使用{}地址模式".format("32位" if self.use_4b_addr else "24位"))
             
             # 执行擦除和编程
-            success = self.erase_sectors()
-            if success:
+            if not self.stop_event.is_set():
+                success = self.erase_sectors()
+            else:
+                success = False
+            
+            if success and not self.stop_event.is_set():
                 success = self.program_flash()
             
             # 显示结果
             if success:
                 self.log("升级完成")
-                messagebox.showinfo("成功", "升级完成")
+                self.root.after(0, lambda: messagebox.showinfo("成功", "升级完成"))
+            elif self.stop_event.is_set():
+                self.log("升级已取消")
             else:
                 self.log("升级失败")
             
         except Exception as e:
             self.log("升级异常: {}".format(str(e)))
-            messagebox.showerror("错误", "升级异常: {}".format(str(e)))
+            self.root.after(0, lambda: messagebox.showerror("错误", "升级异常: {}".format(str(e))))
         
         # 恢复状态
         self.is_upgrading = False
-        self.btn_start.config(state=tk.NORMAL)
+        self.root.after(0, lambda: [self.btn_start.config(state=tk.NORMAL), self.btn_cancel.config(state=tk.DISABLED)])
 
     def erase_sectors(self):
         """
@@ -573,6 +765,11 @@ class FPGAUpgradeTool:
         
         # 逐个擦除扇区
         for i in range(sector_count):
+            # 检查是否需要停止
+            if self.stop_event.is_set():
+                self.log("擦除已取消")
+                return False
+            
             addr = self.flash_start_addr + i * 4096
             
             # 发送写使能命令
@@ -605,6 +802,11 @@ class FPGAUpgradeTool:
         self.progress_label.config(text="正在编程...")
         
         while offset < total_size:
+            # 检查是否需要停止
+            if self.stop_event.is_set():
+                self.log("编程已取消")
+                return False
+            
             chunk = data[offset:offset + 256]
             addr = self.flash_start_addr + offset
             
@@ -642,9 +844,19 @@ class FPGAUpgradeTool:
             return
         
         self.is_reading = True
+        self.stop_event.clear()
         self.btn_start_readback.config(state=tk.DISABLED)
+        self.btn_cancel_readback.config(state=tk.NORMAL)
         self.readback_progress['value'] = 0
         
+        # 在独立线程中执行回读操作
+        self.worker_thread = threading.Thread(target=self._readback_worker, daemon=True)
+        self.worker_thread.start()
+    
+    def _readback_worker(self):
+        """
+        回读工作线程
+        """
         try:
             total_bytes = (self.flash_capacity_mbit * 1024 * 1024) // 8
             read_count = total_bytes // 256
@@ -659,6 +871,12 @@ class FPGAUpgradeTool:
             success = True
             
             for i in range(read_count):
+                # 检查是否需要停止
+                if self.stop_event.is_set():
+                    self.readback_log("回读已取消")
+                    success = False
+                    break
+                
                 retry = 0
                 while retry < 10:
                     addr_bytes = self.build_address_bytes(addr)
@@ -705,31 +923,33 @@ class FPGAUpgradeTool:
                 
                 addr += 256
                 self.readback_progress['value'] = i + 1
-                percent = int((i + 1) / read_count * 100)
-                self.root.update_idletasks()
             
             if success:
-                save_path = filedialog.asksaveasfilename(defaultextension=".bin", filetypes=[("BIN文件", "*.bin")])
-                if save_path:
-                    with open(save_path, 'wb') as f:
-                        f.write(all_data)
-                    
-                    crc32 = zlib.crc32(all_data) & 0xFFFFFFFF
-                    self.txt_crc.config(state=tk.NORMAL)
-                    self.txt_crc.delete(0, tk.END)
-                    self.txt_crc.insert(0, "{:08X}".format(crc32))
-                    self.txt_crc.config(state=tk.DISABLED)
-                    
-                    self.readback_log("回读完成，保存文件: {}".format(save_path))
-                    self.readback_log("CRC32: {:08X}".format(crc32))
-                    messagebox.showinfo("成功", "回读完成\nCRC32: {:08X}".format(crc32))
+                # 使用after在主线程中执行文件保存对话框
+                def save_and_show_result():
+                    save_path = filedialog.asksaveasfilename(defaultextension=".bin", filetypes=[("BIN文件", "*.bin")])
+                    if save_path:
+                        with open(save_path, 'wb') as f:
+                            f.write(all_data)
+                        
+                        crc32 = zlib.crc32(all_data) & 0xFFFFFFFF
+                        self.txt_crc.config(state=tk.NORMAL)
+                        self.txt_crc.delete(0, tk.END)
+                        self.txt_crc.insert(0, "{:08X}".format(crc32))
+                        self.txt_crc.config(state=tk.DISABLED)
+                        
+                        self.readback_log("回读完成，保存文件: {}".format(save_path))
+                        self.readback_log("CRC32: {:08X}".format(crc32))
+                        messagebox.showinfo("成功", "回读完成\nCRC32: {:08X}".format(crc32))
+                
+                self.root.after(0, save_and_show_result)
         
         except Exception as e:
             self.readback_log("回读异常: {}".format(str(e)))
-            messagebox.showerror("错误", "回读异常: {}".format(str(e)))
+            self.root.after(0, lambda: messagebox.showerror("错误", "回读异常: {}".format(str(e))))
         
         self.is_reading = False
-        self.btn_start_readback.config(state=tk.NORMAL)
+        self.root.after(0, lambda: [self.btn_start_readback.config(state=tk.NORMAL), self.btn_cancel_readback.config(state=tk.DISABLED)])
 
     def send_read_command(self, cmd):
         if not self.is_open or not self.ser.is_open:
@@ -743,11 +963,20 @@ class FPGAUpgradeTool:
         except Exception as e:
             return False
 
-    def read_response(self):
+    def read_response(self, timeout=0.5):
+        """
+        读取串口响应
+        
+        Args:
+            timeout (float): 超时时间（秒），默认0.5秒，增加超时时间避免大容量数据读取时超时
+        
+        Returns:
+            bytearray: 完整的响应帧，超时返回None
+        """
         start_time = time.time()
         response = bytearray()
         
-        while time.time() - start_time < 0.1:
+        while time.time() - start_time < timeout:
             if self.ser.in_waiting > 0:
                 response.extend(self.ser.read(self.ser.in_waiting))
                 if len(response) >= 265:
@@ -756,6 +985,93 @@ class FPGAUpgradeTool:
             time.sleep(0.001)
         
         return None
+    
+    def cancel_operation(self):
+        """
+        取消当前操作
+        
+        设置停止事件标志，通知工作线程停止操作
+        """
+        if self.is_upgrading or self.is_reading:
+            self.stop_event.set()
+            self.log("正在取消操作...")
+            self.readback_log("正在取消操作...")
+    
+    def read_flash_id(self):
+        """
+        读取FLASH ID
+        
+        发送读取ID命令（0x9F），FPGA返回3字节ID：Manufacture ID + Memory Type + Memory Capacity
+        返回数据格式：帧头 + 3字节ID + 校验和 + 帧尾
+        """
+        # 检查串口状态
+        if not self.is_open or not self.ser.is_open:
+            messagebox.showwarning("提示", "请先打开串口")
+            return
+        
+        # 构建读取ID命令（0x9F）
+        cmd = self.build_command(0x9F, [])
+        
+        # 发送命令
+        try:
+            # 清空输入缓冲区
+            self.ser.reset_input_buffer()
+            # 发送命令
+            self.ser.write(cmd)
+            self.ser.flush()
+            
+            # 等待响应（500ms超时）
+            start_time = time.time()
+            response = bytearray()
+            
+            while time.time() - start_time < 0.5:
+                if self.ser.in_waiting > 0:
+                    response.extend(self.ser.read(self.ser.in_waiting))
+                    # 检查响应是否完整（帧头4 + 3字节ID + 1字节校验和 + 帧尾4 = 12字节）
+                    if len(response) >= 12:
+                        if response[:4] == self.frame_header and response[-4:] == self.frame_tail:
+                            # 解析ID
+                            manufacture_id = response[4]
+                            memory_type = response[5]
+                            memory_capacity = response[6]
+                            checksum = response[7]
+                            
+                            # 验证校验和
+                            calc_checksum = sum(response[4:7]) & 0xFF
+                            if checksum == calc_checksum:
+                                # 分别显示三个字节
+                                self.txt_manufacture_id.config(state=tk.NORMAL)
+                                self.txt_manufacture_id.delete(0, tk.END)
+                                self.txt_manufacture_id.insert(0, "0x{:02X}".format(manufacture_id))
+                                self.txt_manufacture_id.config(state=tk.DISABLED)
+                                
+                                self.txt_memory_type.config(state=tk.NORMAL)
+                                self.txt_memory_type.delete(0, tk.END)
+                                self.txt_memory_type.insert(0, "0x{:02X}".format(memory_type))
+                                self.txt_memory_type.config(state=tk.DISABLED)
+                                
+                                self.txt_memory_capacity.config(state=tk.NORMAL)
+                                self.txt_memory_capacity.delete(0, tk.END)
+                                self.txt_memory_capacity.insert(0, "0x{:02X}".format(memory_capacity))
+                                self.txt_memory_capacity.config(state=tk.DISABLED)
+                                
+                                flash_id_str = "0x{:02X} 0x{:02X} 0x{:02X}".format(manufacture_id, memory_type, memory_capacity)
+                                self.log("读取FLASH ID成功: {}".format(flash_id_str))
+                                return
+                            else:
+                                self.log("FLASH ID校验和错误")
+                                messagebox.showerror("错误", "FLASH ID校验和错误")
+                                return
+                time.sleep(0.001)
+            
+            # 超时
+            self.log("读取FLASH ID超时")
+            messagebox.showerror("错误", "读取FLASH ID超时")
+        
+        except Exception as e:
+            self.log("读取FLASH ID异常: {}".format(str(e)))
+            messagebox.showerror("错误", "读取FLASH ID异常: {}".format(str(e)))
+
 
 if __name__ == "__main__":
     root = tk.Tk()
