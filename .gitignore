@@ -4,7 +4,7 @@
 #*.vcd
 #*.ghw
 #*.cf
-vivado*
+#vivado*
 *.exe
 *.ico
 # But do not ignore the user directory
