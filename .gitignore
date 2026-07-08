@@ -1,0 +1,17 @@
+# Ignore everything
+#.Xil/
+#prj/
+#*.vcd
+#*.ghw
+#*.cf
+vivado*
+*.exe
+*.ico
+# But do not ignore the user directory
+#!user/
+
+
+# Optionally, ignore specific system files inside user if needed, 
+# but usually we want to keep everything in user.
+# If you want to ignore build artifacts inside user/work, you can add:
+# user/work/
