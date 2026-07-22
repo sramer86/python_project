@@ -158,12 +158,18 @@ class FPGAUpgradeTool:
         # Flash起始地址标签和输入框（十六进制）
         ttk.Label(frame, text="Flash起始地址(HEX)：").grid(row=0, column=0, padx=5, sticky=tk.W)
         self.txt_addr = ttk.Entry(frame, width=12)
-        self.txt_addr.insert(0, "00000000")  # 默认地址0x00000000
+        self.txt_addr.insert(0, "00800000")  # 默认地址0x00800000
         self.txt_addr.grid(row=0, column=1, padx=5)
 
         # 32位地址使能复选框
         self.chk_4b_addr = ttk.Checkbutton(frame, text="32位地址使能", command=self.toggle_4b_addr)
         self.chk_4b_addr.grid(row=0, column=2, padx=10)
+
+        # 要擦除的4K扇区个数输入框
+        ttk.Label(frame, text="要擦除的4K扇区个数：").grid(row=0, column=3, padx=5, sticky=tk.W)
+        self.txt_erase_count = ttk.Entry(frame, width=12)
+        self.txt_erase_count.insert(0, "1")  # 默认擦除1个扇区
+        self.txt_erase_count.grid(row=0, column=4, padx=5)
 
     def setup_operation_section(self, parent):
         """
@@ -181,43 +187,49 @@ class FPGAUpgradeTool:
         # 按钮区域
         btn_frame = ttk.Frame(frame)
         btn_frame.pack(side=tk.LEFT, padx=10)
-        
+
         # 开始升级按钮
         self.btn_start = ttk.Button(btn_frame, text="开始升级", command=self.start_upgrade, width=15)
         self.btn_start.pack(pady=5, side=tk.LEFT)
-        
+
         # 取消按钮（初始禁用）
         self.btn_cancel = ttk.Button(btn_frame, text="取消", command=self.cancel_operation, width=15, state=tk.DISABLED)
         self.btn_cancel.pack(pady=5, side=tk.LEFT, padx=10)
-        
+
         # 读取FLASH ID按钮
         self.btn_read_id = ttk.Button(btn_frame, text="读取FLASH ID", command=self.read_flash_id, width=15)
         self.btn_read_id.pack(pady=5, side=tk.LEFT)
-        
+
         # FLASH ID显示区域（竖向排列）
         id_frame = ttk.Frame(frame)
         id_frame.pack(side=tk.LEFT, padx=20)
-        
+
         # Manufacture ID显示
         id_row1 = ttk.Frame(id_frame)
         id_row1.pack(fill=tk.X, pady=2)
         ttk.Label(id_row1, text="Manufacture ID:", width=16).pack(side=tk.LEFT)
         self.txt_manufacture_id = ttk.Entry(id_row1, width=10, state=tk.DISABLED)
         self.txt_manufacture_id.pack(side=tk.LEFT)
-        
+
         # Memory Type显示
         id_row2 = ttk.Frame(id_frame)
         id_row2.pack(fill=tk.X, pady=2)
         ttk.Label(id_row2, text="Memory Type:", width=16).pack(side=tk.LEFT)
         self.txt_memory_type = ttk.Entry(id_row2, width=10, state=tk.DISABLED)
         self.txt_memory_type.pack(side=tk.LEFT)
-        
+
         # Memory Capacity显示
         id_row3 = ttk.Frame(id_frame)
         id_row3.pack(fill=tk.X, pady=2)
         ttk.Label(id_row3, text="Memory Capacity:", width=16).pack(side=tk.LEFT)
         self.txt_memory_capacity = ttk.Entry(id_row3, width=12, state=tk.DISABLED)
         self.txt_memory_capacity.pack(side=tk.LEFT)
+
+        # 擦除按钮（放在读取FLASH ID显示框后面）
+        erase_btn_frame = ttk.Frame(frame)
+        erase_btn_frame.pack(side=tk.LEFT, padx=10)
+        self.btn_erase = ttk.Button(erase_btn_frame, text="擦除", command=self.erase_manual, width=15)
+        self.btn_erase.pack(pady=5)
 
     def setup_progress_section(self, parent):
         """
@@ -1071,6 +1083,91 @@ class FPGAUpgradeTool:
         except Exception as e:
             self.log("读取FLASH ID异常: {}".format(str(e)))
             messagebox.showerror("错误", "读取FLASH ID异常: {}".format(str(e)))
+
+    def erase_manual(self):
+        """
+        手动擦除Flash扇区
+
+        根据用户输入的扇区数量，从Flash起始地址开始擦除指定数量的4KB扇区
+        每次擦除前先发送写使能命令，然后发送擦除命令
+
+        Returns:
+            bool: 成功返回True，失败返回False
+        """
+        # 检查串口状态
+        if not self.is_open or not self.ser.is_open:
+            messagebox.showwarning("提示", "请先打开串口")
+            return
+
+        try:
+            # 获取要擦除的扇区数量
+            erase_count_str = self.txt_erase_count.get().strip()
+            if not erase_count_str:
+                messagebox.showwarning("提示", "请输入要擦除的4K扇区个数")
+                return
+
+            try:
+                sector_count = int(erase_count_str)
+                if sector_count <= 0:
+                    messagebox.showwarning("提示", "扇区个数必须大于0")
+                    return
+            except ValueError:
+                messagebox.showwarning("提示", "请输入有效的数字")
+                return
+
+            # 获取起始地址
+            addr_str = self.txt_addr.get().strip()
+            if not addr_str:
+                messagebox.showwarning("提示", "请输入Flash起始地址")
+                return
+
+            try:
+                start_addr = int(addr_str, 16)
+            except ValueError:
+                messagebox.showwarning("提示", "请输入有效的十六进制地址")
+                return
+
+            # 确认擦除操作
+            result = messagebox.askyesno("确认", "确定要从地址 0x{:08X} 开始擦除 {} 个4KB扇区吗？".format(start_addr, sector_count))
+            if not result:
+                return
+
+            self.log("开始擦除 {} 个4KB扇区，起始地址: 0x{:08X}".format(sector_count, start_addr))
+
+            # 初始化进度条
+            self.progress_label.config(text="正在擦除...")
+            self.progress_bar['maximum'] = sector_count
+            self.progress_bar['value'] = 0
+
+            # 逐个擦除扇区
+            for i in range(sector_count):
+                addr = start_addr + i * 4096
+
+                # 发送写使能命令
+                if not self.send_command(self.build_command(0x06, [])):
+                    self.log("写使能失败，地址: 0x{:08X}".format(addr))
+                    messagebox.showerror("错误", "写使能失败，地址: 0x{:08X}".format(addr))
+                    return
+
+                # 发送擦除4KB扇区命令
+                addr_bytes = self.build_address_bytes(addr)
+                erase_cmd = self.build_command(0x20, addr_bytes)
+                if not self.send_command(erase_cmd):
+                    self.log("擦除扇区失败，地址: 0x{:08X}".format(addr))
+                    messagebox.showerror("错误", "擦除扇区失败，地址: 0x{:08X}".format(addr))
+                    return
+
+                # 更新进度
+                self.progress_bar['value'] = i + 1
+                self.progress_label.config(text="正在擦除... {}/{}".format(i + 1, sector_count))
+                self.root.update_idletasks()
+
+            self.log("扇区擦除完成")
+            messagebox.showinfo("完成", "成功擦除 {} 个4KB扇区".format(sector_count))
+
+        except Exception as e:
+            self.log("擦除异常: {}".format(str(e)))
+            messagebox.showerror("错误", "擦除异常: {}".format(str(e)))
 
 
 if __name__ == "__main__":
