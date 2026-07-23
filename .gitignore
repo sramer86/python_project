@@ -6,7 +6,7 @@
 #*.cf
 #vivado*
 *.exe
-*.ico
+#*.ico
 # But do not ignore the user directory
 #!user/
 
