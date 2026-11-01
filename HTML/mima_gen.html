@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>登录密码生成</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font-family: "Microsoft YaHei", system-ui, sans-serif;
+    background: linear-gradient(135deg, #eef2f7, #dfe8f3); color: #223;
+  }
+  .card {
+    width: 420px; max-width: 94vw; background: #fff; border-radius: 16px;
+    box-shadow: 0 12px 40px rgba(30,60,110,.16); padding: 26px 26px 22px;
+  }
+  h1 { font-size: 20px; text-align: center; margin: 0 0 20px; color: #1f3b63; }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; }
+  label { font-size: 14px; white-space: nowrap; }
+  input#ym {
+    flex: 1; min-width: 0; padding: 9px 10px; font-size: 16px; text-align: center;
+    border: 1px solid #cdd7e3; border-radius: 8px; font-family: Consolas, monospace;
+  }
+  input#ym:focus { outline: none; border-color: #3f7bd6; }
+  .quick { display: flex; gap: 6px; }
+  button {
+    cursor: pointer; border: none; border-radius: 8px; font-size: 13px;
+    padding: 8px 10px; background: #eaf0f8; color: #2b4a75; transition: .15s;
+  }
+  button:hover { background: #dbe6f5; }
+  .gen { width: 100%; padding: 12px; font-size: 16px; color: #fff; background: #3f7bd6; margin-bottom: 16px; }
+  .gen:hover { background: #2f66bd; }
+  .box { border-radius: 12px; padding: 14px; text-align: center; margin-bottom: 12px; }
+  .box .tag { font-size: 13px; color: #5a6b82; margin-bottom: 6px; }
+  .box .val { font-family: Consolas, monospace; font-size: 40px; font-weight: 700; letter-spacing: 6px; line-height: 1.1; }
+  .login { background: #eaf7ee; } .login .val { color: #0a7d00; }
+  .price { background: #fdf1e3; } .price .val { color: #b35a00; }
+  .detail { font-size: 11px; color: #8a97a8; text-align: center; min-height: 15px; margin-bottom: 12px; word-break: break-all; }
+  .copy { width: 100%; padding: 10px; font-size: 14px; }
+  .hint { font-size: 11px; color: #9aa6b6; text-align: center; margin-top: 12px; line-height: 1.5; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>登录密码生成</h1>
+    <div class="row">
+      <label>年月</label>
+      <input id="ym" placeholder="如 202610" autocomplete="off">
+      <div class="quick">
+        <button data-step="-1">上月</button>
+        <button data-step="0">本月</button>
+        <button data-step="1">下月</button>
+      </div>
+    </div>
+    <button class="gen" onclick="gen()">生成密码</button>
+
+    <div class="box login">
+      <div class="tag">登录密码</div>
+      <div class="val" id="login">----</div>
+    </div>
+    <div class="box price">
+      <div class="tag">查价密码</div>
+      <div class="val" id="price">----</div>
+    </div>
+    <div class="detail" id="detail"></div>
+    <button class="copy" onclick="copyPwd()">复制到剪贴板</button>
+    <div class="hint">密码随月份变化；查价密码为登录密码逐位映射（0→a, 1→b, …, 9→j）。</div>
+  </div>
+
+<script>
+/* =========================================================================
+ * 密码计算核心：精确复刻原 Delphi 程序（x87 80 位 Extended 精度）
+ * 用 BigInt 做精确有理数运算，避免浏览器 double 精度误差。
+ * 算法已与 Python 版逐位对拍（2019–2099 共 970 个月零差异）。
+ * ========================================================================= */
+
+// ---- 有理数基础运算（[分子, 分母]，分母>0，BigInt）----
+function rat(n, d) { n = BigInt(n); d = (d === undefined) ? 1n : BigInt(d); if (d < 0n) { n = -n; d = -d; } return [n, d]; }
+function rmul(a, b) { return [a[0] * b[0], a[1] * b[1]]; }
+function radd(a, b) { return [a[0] * b[1] + b[0] * a[1], a[1] * b[1]]; }
+function rsub(a, b) { return [a[0] * b[1] - b[0] * a[1], a[1] * b[1]]; }
+function rdiv(a, b) { return [a[0] * b[1], a[1] * b[0]]; }
+function bitLen(x) { if (x < 0n) x = -x; return x === 0n ? 0 : x.toString(2).length; }
+function pow2(e) { return e >= 0 ? [1n << BigInt(e), 1n] : [1n, 1n << BigInt(-e)]; }
+function gt(a, b) { return a[0] * b[1] > b[0] * a[1]; }   // a、b 均为正
+
+// 把有理数 v 舍入到 sig 位二进制有效位（round-half-to-even），模拟 FPU
+function roundSig(v, sig) {
+  let n = v[0], d = v[1];
+  if (n === 0n) return [0n, 1n];
+  const sign = n < 0n ? -1n : 1n;
+  const an = n < 0n ? -n : n;
+  let e = bitLen(an) - bitLen(d);
+  const A = [an, d];
+  while (gt(pow2(e), A)) e -= 1;
+  while (!gt(pow2(e + 1), A)) e += 1;
+  const shift = BigInt(sig - 1) - BigInt(e);
+  let sn, sd;
+  if (shift >= 0n) { sn = an * (1n << shift); sd = d; }
+  else { sn = an; sd = d * (1n << (-shift)); }
+  let q = sn / sd, r = sn % sd;
+  if (2n * r > sd || (2n * r === sd && (q & 1n) === 1n)) q += 1n;
+  let rn, rd;
+  if (shift >= 0n) { rn = q; rd = 1n << shift; }
+  else { rn = q * (1n << (-shift)); rd = 1n; }
+  return [sign * rn, rd];
+}
+
+// 把正有理数 num/den 格式化成 15 位有效数字（兼容 %g：去尾零、无多余小数点）
+function fmt15(num, den) {
+  if (num <= 0n) return "0";
+  const ip = num / den;
+  let E = ip.toString().length - 1;
+  const p = 14 - E;
+  let nn, dd;
+  if (p >= 0) { nn = num * (10n ** BigInt(p)); dd = den; }
+  else { nn = num; dd = den * (10n ** BigInt(-p)); }
+  let q = nn / dd, r = nn % dd;
+  if (2n * r > dd || (2n * r === dd && (q & 1n) === 1n)) q += 1n;
+  let digits = q.toString();
+  if (digits.length === 16) { q /= 10n; digits = q.toString(); E += 1; }
+  if (digits.length < 15) digits = digits + '0'.repeat(15 - digits.length);
+  let s;
+  if (E >= 14) s = digits + '0'.repeat(E - 14);
+  else if (E >= 0) s = digits.slice(0, E + 1) + '.' + digits.slice(E + 1);
+  else s = '0.' + '0'.repeat(-E - 1) + digits;
+  if (s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\.$/, '');
+  return s;
+}
+
+// 计算某 yyymm 的登录密码，返回 {code, login}
+function calcCode(yyyymm) {
+  const data = rat(yyyymm, 1);
+  const EXT = 64;
+  const lit = roundSig(rat(201902803n, 1000n), EXT);   // 201902.803
+  let t = rmul(data, rat(59n, 1));
+  t = roundSig(rdiv(t, rsub(data, rat(201902n, 1))), EXT);
+  t = roundSig(radd(t, rsub(data, rat(201398n, 1))), EXT);
+  t = roundSig(rmul(t, roundSig(rsub(data, lit), EXT)), EXT);
+  t = roundSig(rdiv(t, roundSig(rat(3n, 2n), EXT)), EXT);   // /1.5
+  const dbl = roundSig(t, 53);                               // 最终赋给 double
+  const code = fmt15(dbl[0] < 0n ? -dbl[0] : dbl[0], dbl[1]);
+  return { code: code, login: code.slice(-4) };
+}
+
+// 查价密码：逐位数字映射 0→a,1→b,…,9→j
+function pricePassword(pw) {
+  let out = '';
+  for (const ch of pw) {
+    if (ch >= '0' && ch <= '9') out += String.fromCharCode(97 + (ch.charCodeAt(0) - 48));
+    else out += ch;
+  }
+  return out;
+}
+
+// 解析年月 → yyyymm 整数，非法抛异常
+function parseYM(text) {
+  text = (text || '').trim();
+  if (!text) throw new Error('请输入年月，例如 202610');
+  const tokens = text.split(/\D+/).filter(x => x.length);
+  let year, month;
+  if (tokens.length === 2) { year = parseInt(tokens[0], 10); month = parseInt(tokens[1], 10); }
+  else if (tokens.length === 1 && tokens[0].length === 6) {
+    year = parseInt(tokens[0].slice(0, 4), 10); month = parseInt(tokens[0].slice(4, 6), 10);
+  } else throw new Error('请输入 6 位年月，例如 202610（也支持 2026-10）');
+  if (!(month >= 1 && month <= 12)) throw new Error('月份必须为 1~12');
+  const ym = year * 100 + month;
+  if (ym <= 201902) throw new Error('年月需大于 201902');
+  return ym;
+}
+
+/* ------------------------- 界面交互 ------------------------- */
+function curYM() {
+  const d = new Date();
+  return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0');
+}
+function setYM(shift) {
+  const inp = document.getElementById('ym');
+  let base = (inp.value || curYM()).replace(/\D/g, '');
+  if (base.length !== 6) base = curYM();
+  const y = parseInt(base.slice(0, 4), 10), m = parseInt(base.slice(4, 6), 10);
+  const d = new Date(y, m - 1 + shift, 1);
+  inp.value = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0');
+  gen();
+}
+function gen() {
+  const inp = document.getElementById('ym');
+  const ymText = (inp.value || '').trim() || curYM();
+  inp.value = ymText;
+  try {
+    const ym = parseYM(ymText);
+    const r = calcCode(ym);
+    const price = pricePassword(r.login);
+    document.getElementById('login').textContent = r.login;
+    document.getElementById('price').textContent = price;
+    document.getElementById('detail').textContent =
+      ym + ' → FloatToStr = ' + r.code + '，取后 4 位 = ' + r.login;
+  } catch (e) {
+    alert(e.message || '计算失败');
+  }
+}
+function copyPwd() {
+  const l = document.getElementById('login').textContent;
+  const p = document.getElementById('price').textContent;
+  if (!l || l === '----') return;
+  const text = '登录密码：' + l + '\n查价密码：' + p;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => alert('已复制：\n' + text),
+      () => alert('复制失败，请手动选中复制')
+    );
+  } else {
+    alert('请手动选中复制：\n' + text);
+  }
+}
+document.querySelectorAll('.quick button').forEach(b =>
+  b.addEventListener('click', () => setYM(parseInt(b.dataset.step, 10)))
+);
+window.addEventListener('DOMContentLoaded', () => {
+  const inp = document.getElementById('ym');
+  inp.value = curYM();
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') gen(); });
+  gen();
+});
+</script>
+</body>
+</html>

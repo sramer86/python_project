@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+<title>作业打卡记录</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,Segoe UI,Roboto}
+body{background:#f7f9fa;color:#333;padding:12px;font-size:16px}
+.tip{background:#fff3cd;color:#856404;padding:10px;border-radius:8px;margin-bottom:12px;font-size:14px}
+.container{max-width:600px;margin:0 auto}
+.card{background:#fff;border-radius:10px;padding:14px;margin-bottom:12px;box-shadow:0 1px 4px #00000012}
+h3{margin-bottom:10px;font-size:18px}
+.date-bar{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.date-btn{border:none;background:#e8edf2;padding:8px 12px;border-radius:6px;font-size:16px}
+.current-date{font-weight:bold}
+.calendar{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-top:8px}
+.calendar-day{aspect-ratio:1/1;display:flex;align-items:center;justify-content:center;border-radius:6px;font-size:14px;border:1px solid #eee}
+.calendar-day.weekend{background:#efefef;color:#aaa;cursor:not-allowed}
+.calendar-day.green{background:#d4edda;color:#155724}
+.calendar-day.red{background:#f8d7da;color:#721c24}
+.calendar-day.today{outline:2px solid #007bff}
+.calendar-day.clickable{cursor:pointer}
+.subject-item{margin:14px 0}
+.subject-name{font-weight:bold;margin-bottom:6px}
+.radio-group{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:6px}
+.radio-item{display:flex;align-items:center;gap:4px}
+textarea{width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:15px}
+.btn-group{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+button{padding:10px 14px;border:none;border-radius:7px;font-size:15px;cursor:pointer}
+.btn-save{background:#007bff;color:white}
+.btn-export{background:#28a745;color:white}
+.btn-import{background:#ffc107;color:#222}
+.btn-reset{background:#dc3545;color:white}
+.stat-line{margin:6px 0;font-size:15px}
+input[type="file"]{display:none}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="tip">
+    提示：优先在系统浏览器打开，可添加到手机主屏幕；周末不录入作业。
+    <br>规则：【学校完成/回家前完成】✅单科成功；只要有一科【回家后完成】，当日不达标。三科全部成功才算当日达标。
+  </div>
+
+  <div class="card">
+    <div class="date-bar">
+      <button class="date-btn" id="prevDay">←</button>
+      <div class="current-date" id="showDate"></div>
+      <button class="date-btn" id="nextDay">→</button>
+    </div>
+    <div id="calendarWrap"></div>
+  </div>
+
+  <div class="card">
+    <h3>当日作业记录</h3>
+    <div id="subjectList"></div>
+    <div class="btn-group">
+      <button class="btn-save" id="saveBtn">保存当天记录</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>本月统计（仅周一至周五）</h3>
+    <div id="statPanel"></div>
+  </div>
+
+  <div class="card">
+    <h3>数据备份</h3>
+    <div class="btn-group">
+      <button class="btn-export" id="exportBtn">导出CSV</button>
+      <button class="btn-import" id="importBtn">导入CSV</button>
+      <button class="btn-reset" id="resetBtn">清空全部数据</button>
+    </div>
+    <input type="file" id="fileInput" accept=".csv"/>
+    <div style="margin-top:8px;font-size:14px">导入弹窗可选：覆盖全部 / 合并新增</div>
+  </div>
+</div>
+
+<script>
+const SUBJECTS = ["语文","数学","英语"]
+const STATUS_OPTIONS = [
+  {value:"school",label:"学校完成",ok:true},
+  {value:"beforeHome",label:"回家前完成",ok:true},
+  {value:"afterHome",label:"回家后完成",ok:false}
+]
+let currentDate = new Date()
+
+// 存储读写
+function getRecords(){
+  const raw = localStorage.getItem("homeworkRecord")
+  return raw ? JSON.parse(raw) : {}
+}
+function saveRecords(rec){
+  localStorage.setItem("homeworkRecord",JSON.stringify(rec))
+}
+function getDayKey(d){
+  const y = d.getFullYear()
+  const m = String(d.getMonth()+1).padStart(2,"0")
+  const day = String(d.getDate()).padStart(2,"0")
+  return `${y}-${m}-${day}`
+}
+function isWeekend(d){
+  const w = d.getDay()
+  return w===0 || w===6
+}
+
+// 渲染日期标题+日历
+function renderCalendar(){
+  const wrap = document.getElementById("calendarWrap")
+  const y = currentDate.getFullYear()
+  const m = currentDate.getMonth()
+  const first = new Date(y,m,1)
+  const last = new Date(y,m+1,0)
+  document.getElementById("showDate").innerText = `${y}年${m+1}月${currentDate.getDate()}日`
+  let html = `<div class="calendar">`
+  const weekNames = ["日","一","二","三","四","五","六"]
+  weekNames.forEach(w=>html+=`<div class="calendar-day">${w}</div>`)
+  for(let i=0;i<first.getDay();i++) html += `<div></div>`
+  const records = getRecords()
+  for(let d=1;d<=last.getDate();d++){
+    const dt = new Date(y,m,d)
+    const key = `${y}-${String(m+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`
+    const weekend = isWeekend(dt)
+    let cls = "calendar-day"
+    if(weekend) cls += " weekend"
+    else cls += " clickable"
+    if(key === getDayKey(currentDate)) cls += " today"
+    let colorMark = ""
+    if(records[key]){
+      const dayRec = records[key]
+      const allOk = SUBJECTS.every(s=>dayRec[s]?.ok)
+      if(allOk) colorMark = "green"
+      else colorMark = "red"
+      cls += " " + colorMark
+    }
+    html += `<div class="${cls}" data-day="${d}" data-weekend="${weekend}">${d}</div>`
+  }
+  html += "</div>"
+  wrap.innerHTML = html
+  document.querySelectorAll(".calendar-day.clickable").forEach(el=>{
+    el.onclick = ()=>{
+      const dd = parseInt(el.dataset.day)
+      currentDate = new Date(y,m,dd)
+      renderAll()
+    }
+  })
+}
+
+// 渲染三科录入区域
+function renderSubject(){
+  const wrap = document.getElementById("subjectList")
+  const key = getDayKey(currentDate)
+  const records = getRecords()
+  const dayData = records[key] || {}
+  if(isWeekend(currentDate)){
+    wrap.innerHTML = `<div style="color:#777;padding:8px">今天是周末，不录入作业</div>`
+    return
+  }
+  let html = ""
+  SUBJECTS.forEach(sub=>{
+    const sData = dayData[sub] || {status:"school",remark:""}
+    html += `<div class="subject-item">
+      <div class="subject-name">${sub}</div>
+      <div class="radio-group">`
+    STATUS_OPTIONS.forEach(opt=>{
+      html += `<div class="radio-item">
+        <input type="radio" name="${sub}_status" value="${opt.value}" ${sData.status===opt.value?"checked":""}>
+        <label>${opt.label}</label>
+      </div>`
+    })
+    html += `</div>
+    <textarea placeholder="备注（原因等）" data-sub="${sub}">${sData.remark}</textarea>
+    </div>`
+  })
+  wrap.innerHTML = html
+}
+
+// 保存当天
+document.getElementById("saveBtn").onclick = function(){
+  if(isWeekend(currentDate)) return alert("周末不能保存记录")
+  const key = getDayKey(currentDate)
+  const records = getRecords()
+  const dayObj = {}
+  SUBJECTS.forEach(sub=>{
+    const radio = document.querySelector(`input[name="${sub}_status"]:checked`)
+    const remark = document.querySelector(`textarea[data-sub="${sub}"]`).value.trim()
+    const st = radio ? radio.value : "school"
+    const opt = STATUS_OPTIONS.find(x=>x.value===st)
+    dayObj[sub] = {status:st,ok:opt.ok,remark}
+  })
+  records[key] = dayObj
+  saveRecords(records)
+  alert("保存成功")
+  renderAll()
+}
+
+// 统计面板
+function renderStat(){
+  const panel = document.getElementById("statPanel")
+  const y = currentDate.getFullYear()
+  const m = currentDate.getMonth()
+  const last = new Date(y,m+1,0).getDate()
+  const records = getRecords()
+  let totalWorkDay = 0
+  let okDay = 0
+  let failDay = 0
+  const subStat = {
+    "语文":{school:0,beforeHome:0,afterHome:0},
+    "数学":{school:0,beforeHome:0,afterHome:0},
+    "英语":{school:0,beforeHome:0,afterHome:0}
+  }
+  for(let d=1;d<=last;d++){
+    const dt = new Date(y,m,d)
+    if(isWeekend(dt)) continue
+    totalWorkDay++
+    const k = `${y}-${String(m+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`
+    if(!records[k]) continue
+    const dr = records[k]
+    const allOk = SUBJECTS.every(s=>dr[s]?.ok)
+    if(allOk) okDay++
+    else failDay++
+    SUBJECTS.forEach(s=>{
+      const st = dr[s].status
+      subStat[s][st]++
+    })
+  }
+  let html = `
+    <div class="stat-line">本月工作日总数：${totalWorkDay}</div>
+    <div class="stat-line">✅达标天数：${okDay}</div>
+    <div class="stat-line">❌不达标天数：${failDay}</div>
+    <hr style="margin:8px 0">
+  `
+  SUBJECTS.forEach(s=>{
+    const ss = subStat[s]
+    html += `<div class="stat-line">${s}：学校完成${ss.school}次｜回家前完成${ss.beforeHome}次｜回家后完成${ss.afterHome}次</div>`
+  })
+  panel.innerHTML = html
+}
+
+// CSV导出
+document.getElementById("exportBtn").onclick = function(){
+  const rec = getRecords()
+  let csv = "日期,科目,完成状态,是否成功,备注\n"
+  Object.keys(rec).sort().forEach(dateKey=>{
+    const day = rec[dateKey]
+    SUBJECTS.forEach(sub=>{
+      const d = day[sub]
+      const label = STATUS_OPTIONS.find(x=>x.value===d.status).label
+      csv += `${dateKey},${sub},${label},${d.ok?"成功":"未成功"},"${(d.remark||"").replace(/"/g,'""')}"\n`
+    })
+  })
+  const blob = new Blob([csv],{type:"text/csv;charset=utf-8"})
+  const a = document.createElement("a")
+  a.href = URL.createObjectURL(blob)
+  a.download = `作业打卡_${getDayKey(new Date())}.csv`
+  a.click()
+}
+
+// CSV导入
+document.getElementById("importBtn").onclick = function(){
+  document.getElementById("fileInput").click()
+}
+document.getElementById("fileInput").onchange = async function(e){
+  const f = e.target.files[0]
+  if(!f) return
+  const txt = await f.text()
+  const mode = confirm("选择【确定】=覆盖全部旧数据；【取消】=合并新增")
+  const lines = txt.split("\n").filter(x=>x.trim())
+  const rec = mode ? {} : getRecords()
+  for(let i=1;i<lines.length;i++){
+    const row = parseCsvLine(lines[i])
+    if(row.length<5) continue
+    const [dk,sub,label,,rem] = row
+    const opt = STATUS_OPTIONS.find(x=>x.label===label)
+    if(!opt || !SUBJECTS.includes(sub)) continue
+    if(!rec[dk]) rec[dk] = {}
+    rec[dk][sub] = {status:opt.value,ok:opt.ok,remark:rem}
+  }
+  saveRecords(rec)
+  alert("导入完成")
+  renderAll()
+  this.value=""
+}
+function parseCsvLine(line){
+  const res=[];let cur="";let inQuote=false
+  for(let c of line){
+    if(c==='"') inQuote=!inQuote
+    else if(c===',' && !inQuote){res.push(cur);cur=""}
+    else cur+=c
+  }
+  res.push(cur)
+  return res
+}
+
+// 清空全部
+document.getElementById("resetBtn").onclick = function(){
+  if(!confirm("确定清空全部打卡记录？无法恢复！")) return
+  if(!confirm("再次确认，全部数据会被删除！")) return
+  localStorage.removeItem("homeworkRecord")
+  alert("已清空")
+  renderAll()
+}
+
+// 切换日期
+document.getElementById("prevDay").onclick = ()=>{
+  currentDate.setDate(currentDate.getDate()-1)
+  renderAll()
+}
+document.getElementById("nextDay").onclick = ()=>{
+  currentDate.setDate(currentDate.getDate()+1)
+  renderAll()
+}
+
+function renderAll(){
+  renderCalendar()
+  renderSubject()
+  renderStat()
+}
+renderAll()
+</script>
+</body>
+</html>
