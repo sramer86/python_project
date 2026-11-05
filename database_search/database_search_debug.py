@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import importlib
+import locale
 import os
 from pathlib import Path
 import sys
@@ -206,7 +207,7 @@ def default_udl_path() -> Path:
 
 
 class MaterialDatabase:
-    """Small ADO reader that opens the existing UDL connection definition."""
+    """Small pyodbc reader that opens the existing UDL connection definition."""
 
     def __init__(self, udl_path: Path) -> None:
         self.udl_path = udl_path
@@ -216,46 +217,133 @@ class MaterialDatabase:
         if self._connection is not None:
             return
         try:
-            win32com_client = importlib.import_module("win32com.client")
+            pyodbc = importlib.import_module("pyodbc")
         except ImportError as exc:
             raise RuntimeError(
-                "当前 Python 环境未安装 pywin32。请运行："
-                "python -m pip install pywin32"
+                "当前 Python 环境未安装 pyodbc。请运行："
+                "python -m pip install pyodbc"
             ) from exc
 
-        connection = win32com_client.Dispatch("ADODB.Connection")
-        connection.ConnectionTimeout = 10
-        connection.CommandTimeout = 30
-        connection.Open(f"File Name={self.udl_path}")
+        connection_string = build_odbc_connection_string(self.udl_path)
+        connection = pyodbc.connect(connection_string, timeout=10)
+        connection.timeout = 30
         self._connection = connection
 
     def search(self, sql: str) -> list[tuple[str, ...]]:
         self._open_connection()
-        recordset: Any = None
+        cursor = self._connection.cursor()
         try:
-            recordset = self._connection.Execute(sql)[0]
-            rows: list[tuple[str, ...]] = []
-            while not recordset.EOF:
-                row = tuple(
+            cursor.execute(sql)
+            return [
+                tuple(
                     ""
                     if value is None
                     else str(int(value))
                     if index == 2
                     else str(value)
-                    for index in range(len(DISPLAY_FIELDS))
-                    for value in (recordset.Fields.Item(index).Value,)
+                    for index, value in enumerate(record)
                 )
-                rows.append(row)
-                recordset.MoveNext()
-            return rows
+                for record in cursor.fetchall()
+            ]
         finally:
-            if recordset is not None:
-                recordset.Close()
+            cursor.close()
 
     def close(self) -> None:
         if self._connection is not None:
-            self._connection.Close()
+            self._connection.close()
             self._connection = None
+
+
+def build_odbc_connection_string(udl_path: Path) -> str:
+    """Read an OLE DB UDL and translate its SQL Server settings for pyodbc."""
+    content = udl_path.read_bytes()
+    if content.startswith((b"\xff\xfe", b"\xfe\xff")):
+        udl_text = content.decode("utf-16")
+    else:
+        try:
+            udl_text = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            udl_text = content.decode(locale.getpreferredencoding(False))
+
+    initialization_lines = [
+        line.strip()
+        for line in udl_text.splitlines()
+        if line.strip()
+        and not line.lstrip().startswith((";", "["))
+    ]
+    properties: dict[str, str] = {}
+    for line in initialization_lines:
+        for item in _split_udl_properties(line):
+            key, separator, value = item.partition("=")
+            if separator:
+                properties[key.strip().casefold()] = _unquote_udl_value(
+                    value.strip()
+                )
+
+    provider = properties.get("provider", "").casefold()
+    if provider not in {"sqloledb", "sqloledb.1"}:
+        raise ValueError(f"不支持的 UDL Provider：{provider or '未指定'}")
+
+    driver = "SQL Server"
+    key_map = {
+        "data source": "SERVER",
+        "initial catalog": "DATABASE",
+        "user id": "UID",
+        "password": "PWD",
+        "integrated security": "Trusted_Connection",
+        "connect timeout": "Connection Timeout",
+        "connection timeout": "Connection Timeout",
+        "application name": "APP",
+        "workstation id": "WSID",
+    }
+    connection_properties = [("DRIVER", driver)]
+    for key, value in properties.items():
+        if key in {"provider", "persist security info"}:
+            continue
+        connection_properties.append((key_map.get(key, key), value))
+
+    return ";".join(
+        f"{key}={_quote_odbc_value(value)}"
+        for key, value in connection_properties
+    )
+
+
+def _split_udl_properties(initialization_line: str) -> list[str]:
+    """Split UDL properties while preserving semicolons in braced values."""
+    properties: list[str] = []
+    start = 0
+    in_braces = False
+    index = 0
+    while index < len(initialization_line):
+        char = initialization_line[index]
+        if char == "{" and not in_braces:
+            in_braces = True
+        elif char == "}" and in_braces:
+            if (
+                index + 1 < len(initialization_line)
+                and initialization_line[index + 1] == "}"
+            ):
+                index += 1
+            else:
+                in_braces = False
+        elif char == ";" and not in_braces:
+            properties.append(initialization_line[start:index])
+            start = index + 1
+        index += 1
+    properties.append(initialization_line[start:])
+    return properties
+
+
+def _unquote_udl_value(value: str) -> str:
+    if value.startswith("{") and value.endswith("}"):
+        return value[1:-1].replace("}}", "}")
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _quote_odbc_value(value: str) -> str:
+    return "{" + value.replace("}", "}}") + "}"
 
 
 class MaterialSearchApp:
@@ -268,6 +356,7 @@ class MaterialSearchApp:
         self._loaded_count = 0
         self._has_more = False
         self._loading = False
+        self._copy_column_index = 0
         self.root.title("物料数据库检索（分页调试版）")
         self.root.geometry("1020x620")
         self.root.minsize(760, 420)
@@ -374,6 +463,13 @@ class MaterialSearchApp:
             show="headings",
             selectmode="browse",
         )
+        self._result_context_menu = tk.Menu(self.root, tearoff=False)
+        self._result_context_menu.add_command(
+            label="复制单元格", command=self._copy_current_cell
+        )
+        self.results.bind("<ButtonRelease-1>", self._on_result_click)
+        self.results.bind("<Button-3>", self._on_result_context)
+        self.results.bind("<Control-c>", self._copy_current_cell)
         widths = (180, 330, 100, 130, 100, 100)
         for field, title, width in zip(
             DISPLAY_FIELDS, DISPLAY_TITLES, widths
@@ -401,6 +497,43 @@ class MaterialSearchApp:
         ttk.Label(
             self.root, textvariable=self.status_text, anchor=tk.W, padding=8
         ).pack(fill=tk.X)
+
+    def _on_result_click(self, event: tk.Event) -> None:
+        if self.results.identify_region(event.x, event.y) != "cell":
+            return
+        column = self.results.identify_column(event.x)
+        if column.startswith("#"):
+            column_index = int(column[1:]) - 1
+            if 0 <= column_index < len(DISPLAY_FIELDS):
+                self._copy_column_index = column_index
+
+    def _on_result_context(self, event: tk.Event) -> str:
+        if self.results.identify_region(event.x, event.y) != "cell":
+            return "break"
+        item = self.results.identify_row(event.y)
+        column = self.results.identify_column(event.x)
+        if not item or not column.startswith("#"):
+            return "break"
+        column_index = int(column[1:]) - 1
+        if not 0 <= column_index < len(DISPLAY_FIELDS):
+            return "break"
+
+        self._copy_column_index = column_index
+        self.results.selection_set(item)
+        self.results.focus(item)
+        self._result_context_menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    def _copy_current_cell(self, _event: tk.Event | None = None) -> str:
+        item = self.results.focus()
+        if not item:
+            return "break"
+        values = self.results.item(item, "values")
+        if self._copy_column_index >= len(values):
+            return "break"
+        self.root.clipboard_clear()
+        self.root.clipboard_append(str(values[self._copy_column_index]))
+        return "break"
 
     def _add_combobox(
         self,
